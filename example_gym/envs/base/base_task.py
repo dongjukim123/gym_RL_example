@@ -33,6 +33,7 @@ from isaacgym import gymapi
 from isaacgym import gymutil
 import numpy as np
 import torch
+import isaacgym 
 
 # Base class for RL tasks
 class BaseTask():
