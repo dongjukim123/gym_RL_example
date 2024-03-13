@@ -28,23 +28,4 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import os
-from datetime import datetime
-from typing import Tuple
-import torch
-import numpy as np
 
-from rsl_rl.env import VecEnv
-from rsl_rl.runners import OnPolicyRunner
-
-from example_gym import TASK_GYM_ENVS_DIR, TASK_GYM_ROOT_DIR
-from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
-from example_gym.envs.base.robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
-
-class TaskRegistry:
-    def __init__(self) -> None:
-
-
-
-
-task_registry = TaskRegistry()

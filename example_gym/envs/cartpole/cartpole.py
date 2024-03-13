@@ -1,5 +1,10 @@
 import numpy as np
 import os
+import sys
+sys.path.append('/home/dongjukim/gym_RL_example')
+print(sys.path)
+
+
 from example_gym import TASK_ASSET_DIR
 from isaacgym import gymapi
 from isaacgym import gymutil
@@ -20,6 +25,8 @@ sim = gym.create_sim()
 robot_asset = gym.load_asset(sim,asset_root,asset_file)
 
 num_envs = 20
+envs=[]
+handles=[]
 envs_per_row = 5
 env_spacing = 5
 env_lower = gymapi.Vec3(-env_spacing,0.0,env_spacing)
@@ -32,10 +39,10 @@ viewer = gym.create_viewer(sim, cam_props)
 
 for i in range(num_envs):
     env = gym.create_env(sim,env_lower,env_upper,envs_per_row)
-
+    envs.append(env)
     pose = gymapi.Transform(gymapi.Vec3(0.0, 2.0, 0.0), gymapi.Quat(-0.707107, 0.0, 0.0, 0.707107))
-    gym.create_actor(env,robot_asset,pose,'cart_pole')
-
+    handle = gym.create_actor(env,robot_asset,pose,'cart_pole')
+    handles.append(handle)
 
 while not gym.query_viewer_has_closed(viewer):
     # step the physics
