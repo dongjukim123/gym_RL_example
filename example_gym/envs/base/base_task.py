@@ -39,6 +39,7 @@ import isaacgym
 class BaseTask():
 
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
+        
         self.gym = gymapi.acquire_gym()
 
         self.sim_params = sim_params
