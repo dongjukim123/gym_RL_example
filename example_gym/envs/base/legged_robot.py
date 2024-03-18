@@ -35,7 +35,7 @@ class LeggedRobot(BaseTask):
 
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos,self.cfg.viewer.lookat)
-        
+        self._init_buffers()
 
     def step(self,actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -94,7 +94,7 @@ class LeggedRobot(BaseTask):
         """ acquire_actor_root_state_tensor : shpaes(num_actors, 13), position([0:3]), rotation([3:7]), 
                                               linear_velocity([7:10]), angular_velocity([10:13])
                                               return type: gymapi.tensor
-            acquire_dof_state_tensor : shape(num_dofs,2) 2 : position, velocity
+            acquire_dof_state_tensor : shape(num_dofs,2) 2 : num_dof = num_actors * each dof of robot,  position, velocity
             
             acquire_net_contact_force_tensor : shape(num_rigid_bodies,3) :contact force x,y,z axis
         """
@@ -107,16 +107,44 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
         #create some wrapper tensors for different slices
-        self.root_states = gymtorch.wrap_tensor(actor_root_state)
-        self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
+        self.root_states = gymtorch.wrap_tensor(actor_root_state) # torch.shape(num_actors(액터의 개수),12)
+        self.dof_state = gymtorch.wrap_tensor(dof_state_tensor) # torch.shape(num_dof,2) --> num_dof = actor 개수(envs 개수) * dof of robot
         self.dof_pos = self.dof_state.view(self.num_envs,self.num_dof,2)[...,0]
         self.dof_vel = self.dof_state.view(self.num_envs,self.num_dof,2)[...,1]
+        self.base_quat = self.root_states[:,3:7] # rotation x y z w quaternion
 
 
         self.base_quat = self.root_states[:, 3:7]
+        self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
         # initialize some data used later on
         self.common_step_counter =0
+
+        self.p_gains = torch.zeros(self.num_actions,dtype=torch.float,device=self.device,requires_grad=False)
+        self.d_gains = torch.zeros(self.num_actions,dtype=torch.float,device=self.device,requires_grad=False)
         self.gravity_vec = to_torch(get_axis_params(-1.,self.up_axis_idx),device=self.device).repeat((self.num_envs,1))
+
+
+
+        # joint positions offsets and PD gains
+        self.default_dof_pos = torch.zeros(self.num_dof,dtype=torch.float,device=self.device,requires_grad=False)
+        for i in range(self.num_dof):
+            name = self.dof_names[i] # name : urdf상의 조인트 이름
+            angle = self.cfg.init_state.default_joint_angles[name]
+            self.default_dof_pos[i] = angle
+            found = False
+            for dof_name in self.cfg.control.stiffness.keys():
+                if dof_name in name:
+                    self.p_gains[i] = self.cfg.control.stiffness[dof_name]
+                    self.d_gains[i] = self.cfg.control.damping[dof_name]
+                    found = True
+                if not found:
+                    self.p_gains[i] = 0.
+                    self.d_gains[i] = 0.
+                    if self.cfg.control.control_type in ["P","V"]:
+                        print(f"PD gain of joint {name} were not defined, setting them to zero")
+        
+        self.default_dof_pos = self.default_dof_pos.unsqueeze(0) # torch.shape(1,12) 나중에 연산을 수행하기 위해 차원을 추가하였음
+
 
 
     def _prepare_reward_function(self):
@@ -184,6 +212,7 @@ class LeggedRobot(BaseTask):
         dof_props_asset = self.gym.get_asset_dof_properties(robot_asset)
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(robot_asset)
 
+        self.dof_names = self.gym.get_asset_dof_names(robot_asset)
 
     def create_sim(self):
         """ creates simulation, terrain and environments
