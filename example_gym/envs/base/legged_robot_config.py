@@ -16,9 +16,15 @@ class LeggedRobotCfg(BaseConfig):
         vertical_sacle = 0.005 # [m]
         border_size = 25 # [m]
         curriculum = True
+        static_friction = 1.0
+        dynamic_friction = 1.0
+
         #rough terrain only:
         measure_heights = True
+        measured_points_x = [-0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] # 1mx1.6m rectangle (without center line)
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
 
+        
     class commands:
         num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
         resampling_time = 10. # time before command are changed[s] 이 값이 클수록 lin_vel_x, lin_vel_y, ang_vel_yaw, heading 값이 자주 바뀜
@@ -43,6 +49,9 @@ class LeggedRobotCfg(BaseConfig):
         file =""
         name = "legged_robot"
         foot_name = "None" # name of the feet bodies, used to index body state and contact force tensors
+        penalize_contacts_on = []
+        terminate_after_contacts_on = []
+        disable_gravity = False
 
     class init_state:
         pos = [0.0,0.0,1.] # x y z (m)
@@ -67,6 +76,16 @@ class LeggedRobotCfg(BaseConfig):
         added_mass_range = [-1., 1.]
         push_robots = True
         push_interval_s = 15
+
+    class rewards:
+        class scales:
+            termination = -0.0
+
+        
+        tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        tracking_sigma_lat = 0.25  # tracking reward = exp(-error^2/sigma)
+        tracking_sigma_long = 0.25  # tracking reward = exp(-error^2/sigma)
+        tracking_sigma_yaw = 0.25  # tracking reward = exp(-error^2/sigma)
 
 
 

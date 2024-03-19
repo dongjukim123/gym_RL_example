@@ -89,7 +89,35 @@ class LeggedRobot(BaseTask):
 
         self._post_physics_step_callback()
 
+        #compute observations, rewards, resets, ...
+        self.check_termination()
+        self.compute_reward()
+        env_ids = self.reset_buf
+        self.reset_idx(env_ids)
+
+
         # compute observations, rewards, resets, ...
+
+
+    def check_termination(self):
+        self.reset_buf = torch.any(torch.norm(self.contact_forces[:,self.termination_contact_indices,:],dim=-1)>1.,dim=1)
+
+    def compute_reward(self):
+
+
+    def reset_idx(self,env_ids):
+        """ Reset some environments.
+            Calls self._reset_dofs(env_ids), self._reset_root_states(env_ids), and self._resample_commands(env_ids)
+            [Optional] calls self._update_terrain_curriculum(env_ids), self.update_command_curriculum(env_ids) and
+            Logs episode info
+            Resets some buffers
+
+        Args:
+            env_ids (list[int]): List of environment ids which must be reset
+        """
+
+    def compute_observations(self):
+
     def set_camera(self, position, lookat):
 
 
@@ -141,7 +169,8 @@ class LeggedRobot(BaseTask):
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:,7:10]) #global -> base
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:,10:13]) # global -> base
         self.projected_gravity = quat_rotate_inverse(self.base_quat,self.gravity_vec)
-
+        if self.cfg.terrain.measure_heights:
+            self.height_points = self._init_height_points()
         self.measured_heights = 0
 
         # joint positions offsets and PD gains
@@ -233,7 +262,29 @@ class LeggedRobot(BaseTask):
         dof_props_asset = self.gym.get_asset_dof_properties(robot_asset)
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(robot_asset)
 
+        # save body names from the asset
+        body_names = self.gym.get_asset_rigid_body_names(robot_asset)
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
+        self.num_bodies = len(body_names)
+        self.num_dofs = len(self.dof_names)
+        feet_names = [s for s in body_names if ]
+        self.dof_names = self.gym.get_asset_dof_names(robot_asset)
+
+        termination_contact_names = []
+        for name in self.cfg.asset.terminate_after_contacts_on:
+            termination_contact_names.extend([s for s in body_names if name in s])
+
+
+
+        env_lower = gymapi.Vec3(0., 0., 0.)
+        env_upper = gymapi.Vec3(0., 0., 0.)
+        self.actor_handles = []
+        self.envs = []
+
+        for i in range(self.num_envs):
+            # create env instance
+            env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs))) # envs per row에 놓을 simulation env create
+
 
     def create_sim(self):
         """ creates simulation, terrain and environments
@@ -284,7 +335,7 @@ class LeggedRobot(BaseTask):
             self.commands[:, 2] = torch.clip(0.5*wrap_to_pi(self.commands[:, 3] - heading), -1., 1.)
 
         if self.cfg.terrain.measure_heights:
-            self.measured_heights = self._get_heights()
+            self.measured_heights = self._get_heights() 
         if self.cfg.domain_rand.push_robots and  (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
             self._push_robots()
     # resampling time과 self.dt시간에 의해 자주 업데이트 됨 
@@ -312,6 +363,50 @@ class LeggedRobot(BaseTask):
 
 
 
+    # _init_height_points와 _get_heights 함수는 terrain이 rough일 때만 동작되는 함수임. rough terrain의 높이를 반환해줌
+    def _init_height_points(self):
+        """ Returns points at which the height measurments are sampled (in base frame)
 
+        Returns:
+            [torch.Tensor]: Tensor of shape (num_envs, self.num_height_points, 3)
+        """
+        x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device, requires_grad=False)
+        y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device, requires_grad=False)
+        grid_x, grid_y = torch.meshgrid(x, y) #격자 형태를 만든다 
 
+        self.num_height_points = grid_x.numel()
+        points = torch.zeros(self.num_envs, self.num_height_points, 3, device=self.device, requires_grad=False)
+        points[:, :, 0] = grid_x.flatten()
+        points[:, :, 1] = grid_y.flatten()
+        return points
+    
     def _get_heights(self,env_ids=None):
+        """ Samples heights of the terrain at required points around each robot.
+            The points are offset by the base's position and rotated by the base's yaw
+
+        Args:
+            env_ids (List[int], optional): Subset of environments for which to return the heights. Defaults to None.
+
+        Raises:
+            NameError: [description]
+
+        Returns:
+            [type]: [description]
+        """
+        if self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros(self.num_envs,self.num_height_points, device= self.device, requires_grad=False)
+        elif self.cfg.terrain.mesh_type == "none":
+            raise NameError("Can't measure height with terrain mesh type 'none'")
+
+        if env_ids:
+            points = quat_apply_yaw(self.base_quat[env_ids].repeat(1, self.num_height_points), self.height_points[env_ids]) + (self.root_states[env_ids, :3]).unsqueeze(1)
+        else:
+            points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) + (self.root_states[:, :3]).unsqueeze(1)       
+
+
+
+    #------------ reward functions----------------
+        
+    def _reward_tracking_lin_vel(self):
+        lin_vel_error = torch.sum(torch.square(self.commands[:,:2]-self.base_lin_vel[:,:2]),dim=1)
+        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
