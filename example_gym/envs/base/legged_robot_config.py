@@ -18,6 +18,7 @@ class LeggedRobotCfg(BaseConfig):
         curriculum = True
         static_friction = 1.0
         dynamic_friction = 1.0
+        restitution = 0.
 
         #rough terrain only:
         measure_heights = True
@@ -76,6 +77,7 @@ class LeggedRobotCfg(BaseConfig):
         added_mass_range = [-1., 1.]
         push_robots = True
         push_interval_s = 15
+        max_push_vel_xy = 1.
 
     class rewards:
         class scales:

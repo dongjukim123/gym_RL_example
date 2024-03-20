@@ -37,6 +37,7 @@ class LeggedRobot(BaseTask):
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos,self.cfg.viewer.lookat)
         self._init_buffers()
+        self._prepare_reward_function()
 
     def step(self,actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -103,7 +104,21 @@ class LeggedRobot(BaseTask):
         self.reset_buf = torch.any(torch.norm(self.contact_forces[:,self.termination_contact_indices,:],dim=-1)>1.,dim=1)
 
     def compute_reward(self):
-
+        """ Compute rewards
+            Calls each reward function which had a non-zero scale (processed in self._prepare_reward_function())
+            adds each terms to the episode sums and to the total reward
+        """
+        self.rew_buf[:] = 0.
+        for i in range(len(self.reward_functions)):
+            name = self.reward_names[i]
+            rew = self.reward_functions[i]() * self.reward_scales[name] # torch size(env_nums) : rew
+            self.episode_sums[name] += rew
+        if self.cfg.rewards.only_positive_rewards:
+            self.rew_buf[:] = torch.clip(self.rew_buf[:], min =0.)
+        if "termination" in self.reward_scales:
+            rew = self._reward_termination() * self.reward_scales["termination"]
+            self.rew_buf += rew
+            self.episode_sums["termination"] += rew
 
     def reset_idx(self,env_ids):
         """ Reset some environments.
@@ -119,9 +134,13 @@ class LeggedRobot(BaseTask):
     def compute_observations(self):
 
     def set_camera(self, position, lookat):
+        """ Set camera position and direction
+        """
+        cam_pos = gymapi.Vec3(position[0], position[1], position[2])
+        cam_target = gymapi.Vec3(lookat[0], lookat[1], lookat[2])
+        self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
-
-
+   #--------------------------------------------------------------------------
     def _init_buffers(self):
         """ Initialize torch tensors which will contain simulation states and processed quantities
         """
@@ -148,19 +167,20 @@ class LeggedRobot(BaseTask):
         self.dof_pos = self.dof_state.view(self.num_envs,self.num_dof,2)[...,0]
         self.dof_vel = self.dof_state.view(self.num_envs,self.num_dof,2)[...,1]
         self.base_quat = self.root_states[:,3:7] # rotation x y z w quaternion
-
-
         self.base_quat = self.root_states[:, 3:7]
+    
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
+
         # initialize some data used later on
-        self.common_step_counter =0
+        self.common_step_counter =0 # step이 한 번 될 때마다 +1씩 증가됨 post_physics_step 함수에서
+        self.extras ={}
 
         self.p_gains = torch.zeros(self.num_actions,dtype=torch.float,device=self.device,requires_grad=False)
         self.d_gains = torch.zeros(self.num_actions,dtype=torch.float,device=self.device,requires_grad=False)
         self.gravity_vec = to_torch(get_axis_params(-1.,self.up_axis_idx),device=self.device).repeat((self.num_envs,1))
         self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False) # x vel, y vel, yaw vel, heading
-
+        self.torques = torch.zeros(self.num_envs,self.num_actions,dtype=torch.float,device=self.device,requires_grad=False)
 
 
 
@@ -194,11 +214,32 @@ class LeggedRobot(BaseTask):
         self.default_dof_pos = self.default_dof_pos.unsqueeze(0) # torch.shape(1,12) 나중에 연산을 수행하기 위해 차원을 추가하였음
 
 
-    def _parse_cfg(self,cfg):
-        self.dt = self.cfg.control.decimation * self.sim_params.dt
-        self.command_ranges = class_to_dict(self.cfg.commands.ranges)
+
     def _prepare_reward_function(self):
-        
+        """ Prepares a list of reward functions, whcih will be called to compute the total reward.
+            Looks for self._reward_<REWARD_NAME>, where <REWARD_NAME> are names of all non zero reward scales in the cfg.
+        """
+        # remove zero scales + multiply non-zero ones by dt
+        for key in list(self.reward_scales.keys()):
+            scales = self.reward_scales[key]
+            if scales == 0:
+                self.reward_scales.pop(key)
+            else:
+                self.reward_scales[key] *= self.dt
+        #prepare list of functions
+        self.reward_functions = []
+        self.reward_names = []
+        for name, scale in self.reward_scales.items():
+            if name == " termination":
+                continue
+            self.reward_names.append(name)
+            name = f'_reward_' + name
+            self.reward_functions.append(getattr(self,name))
+
+        # reward episode sums
+        self.episode_sums = {name: torch.zeros(self.num_envs, dtype = torch.float, device= self.device, requires_grad= False)
+                             for name in self.reward_scales.keys()}
+
 
     def _compute_torques(self,actions):
         """ Compute torques from actions.
@@ -225,7 +266,10 @@ class LeggedRobot(BaseTask):
         
         return torch.clip(torques,-self.torque_limits,self.torque_limits)
     
-
+    def _parse_cfg(self,cfg):
+        self.dt = self.cfg.control.decimation * self.sim_params.dt
+        self.command_ranges = class_to_dict(self.cfg.commands.ranges)
+        self.reward_scales = class_to_dict(self.cfg.rewards.scales)
 
     def _create_envs(self):
         """ Creates environments:
@@ -308,15 +352,50 @@ class LeggedRobot(BaseTask):
 
 
 
+    """ terrain 만드는 함수들 3가지 """
     def _create_ground_plane(self):
-
+        """ Adds a ground plane to the simulation, sets friction and restitution based on the cfg.
+        """
+        plane_params = gymapi.PlaneParams()
+        plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
+        plane_params.static_friction = self.cfg.terrain.static_friction
+        plane_params.dynamic_friction = self.cfg.terrain.dynamic_friction
+        plane_params.restitution = self.cfg.terrain.restitution
+        self.gym.add_ground(self.sim, plane_params)
 
 
     def _create_heightfield(self):
+        hf_params = gymapi.HeightFieldParams()
+        hf_params.column_scale = self.cfg.terrain.horizontal_scale
+        hf_params.row_scale = self.cfg.terrain.horizontal_scale
+        hf_params.vertical_scale = self.cfg.terrain.vertical_scale
+        hf_params.nbRows = self.terrain.tot_cols
+        hf_params.nbColumns = self.terrain.tot_rows 
+        hf_params.transform.p.x = -self.cfg.terrain.border_size 
+        hf_params.transform.p.y = -self.cfg.terrain.border_size
+        hf_params.transform.p.z = 0.0
+        hf_params.static_friction = self.cfg.terrain.static_friction
+        hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
+        hf_params.restitution = self.cfg.terrain.restitution
 
+        self.gym.add_heightfield(self.sim, self.terrain.heightsamples, hf_params)
+        self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
 
     def _create_trimesh(self):
+        """ Adds a triangle mesh terrain to the simulation, sets parameters based on the cfg.
+        # """
+        tm_params = gymapi.TriangleMeshParams()
+        tm_params.nb_vertices = self.terrain.vertices.shape[0]
+        tm_params.nb_triangles = self.terrain.triangles.shape[0]
 
+        tm_params.transform.p.x = -self.terrain.cfg.border_size 
+        tm_params.transform.p.y = -self.terrain.cfg.border_size
+        tm_params.transform.p.z = 0.0
+        tm_params.static_friction = self.cfg.terrain.static_friction
+        tm_params.dynamic_friction = self.cfg.terrain.dynamic_friction
+        tm_params.restitution = self.cfg.terrain.restitution
+        self.gym.add_triangle_mesh(self.sim, self.terrain.vertices.flatten(order='C'), self.terrain.triangles.flatten(order='C'), tm_params)   
+        self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
     #-------------------Callbacks------------------
         
 
@@ -360,7 +439,10 @@ class LeggedRobot(BaseTask):
     def _push_robots(self):
         """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity. 
         """
-
+        max_vel = self.cfg.domain_rand.max_push_vel_xy
+        #linear velocity x y of base
+        self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device) # lin vel x/y
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
 
 
     # _init_height_points와 _get_heights 함수는 terrain이 rough일 때만 동작되는 함수임. rough terrain의 높이를 반환해줌
@@ -380,6 +462,7 @@ class LeggedRobot(BaseTask):
         points[:, :, 1] = grid_y.flatten()
         return points
     
+    # quat_apply_yaw 함수와 quat_apply함수 좀 뜯어보기 나중에 할 일
     def _get_heights(self,env_ids=None):
         """ Samples heights of the terrain at required points around each robot.
             The points are offset by the base's position and rotated by the base's yaw
@@ -403,10 +486,28 @@ class LeggedRobot(BaseTask):
         else:
             points = quat_apply_yaw(self.base_quat.repeat(1, self.num_height_points), self.height_points) + (self.root_states[:, :3]).unsqueeze(1)       
 
+        points += self.terrain.cfg.border_size
+        points = (points/self.terrain.cfg.horizontal_scale).long()
+        px = points[:, :, 0].view(-1)
+        py = points[:, :, 1].view(-1)
+        px = torch.clip(px, 0, self.height_samples.shape[0]-2)
+        py = torch.clip(py, 0, self.height_samples.shape[1]-2)
 
+        heights1 = self.height_samples[px, py]
+        heights2 = self.height_samples[px+1, py]
+        heights3 = self.height_samples[px, py+1]
+        heights = torch.min(heights1, heights2)
+        heights = torch.min(heights, heights3)
+
+        return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
     #------------ reward functions----------------
         
     def _reward_tracking_lin_vel(self):
         lin_vel_error = torch.sum(torch.square(self.commands[:,:2]-self.base_lin_vel[:,:2]),dim=1)
         return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
+    
+
+    def _reward_termination(self):
+        # Terminal reward / penalty
+        return self.reset_buf * ~self.time_out_buf
